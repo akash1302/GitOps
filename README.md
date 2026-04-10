@@ -1,158 +1,30 @@
-# platform-config-repo — GitOps Source of Truth
+This GitOps strategy is a production-ready system where Git is the single source of truth for all infrastructure and application deployments. In this model, no one touches the production clusters directly; every change flows through Git commits that are reviewed and approved
 
-This is the ONLY repo that Argo CD watches.
-No application source code lives here — only deployment configuration.
+Here is a simplified breakdown of the strategy:
 
-## The Golden Rule
-> "A commit to this repo = a change to what runs in Kubernetes"
-> "A commit to user-service-repo = a change to application code only (CI handles rest)"
+1. The Core Rule: Separate Repositories
+The most important concept is keeping your code and your deployment instructions in separate places:
 
----
+Application Repo (The "What"): Contains the source code (e.g., Node.js or Python), the Dockerfile, and unit tests. This is owned by developers.
+GitOps Repo (The "How" and "Where"): Contains deployment configurations like Helm values and Argo CD manifests. This is owned by the platform team and is the heart of the system.
+2. The Step-by-Step Flow
+When a developer wants to update a service, the following happens:
 
-## How It All Connects (read this first)
+Code Push: The developer pushes code to the Application Repo.
+CI Build: GitLab CI runs tests and builds a new Docker image.
+Update GitOps: Instead of deploying to the cluster, the CI pipeline simply updates a version tag in the GitOps Repo.
+Argo CD Sync: Argo CD (the deployment tool) "pulls" the change from the GitOps repo and updates the Kubernetes cluster to match that new state.
+3. Smart Management with Helm and "App-of-Apps"
+Generic Helm Charts: Instead of a unique chart for every service, the strategy uses one reusable chart for all microservices. You only change the "values" files to specify different settings for different services or environments.
+App-of-Apps Pattern: This pattern manages Argo CD itself as code. You create one "root" application that automatically discovers and manages all other "child" applications.
+4. Environments and Safety
+The strategy uses three separate AWS accounts for complete isolation:
 
-```
-Developer pushes code to user-service-repo
-   ↓
-GitLab CI builds Docker image → pushes to ECR (image tag = abc1234)
-   ↓
-CI updates THIS repo: clusters/dev/user-service/values-dev.yaml
-  changes:  tag: "old123"  →  tag: "abc1234"
-   ↓
-Argo CD detects the Git diff in this repo
-   ↓
-Argo CD renders Helm chart (helm-charts/generic-service/) 
-  with merged values (values.yaml + values-dev.yaml)
-   ↓
-Argo CD applies the rendered manifests to the EKS cluster
-   ↓
-New pod with image:abc1234 rolls out in dev-user-service namespace
-```
-
----
-
-## Folder-by-Folder Guide
-
-### bootstrap/   ← START HERE (applied once per cluster, manually)
-```
-bootstrap/dev/root-app.yaml       ← kubectl apply THIS to the dev cluster ONCE
-bootstrap/staging/root-app.yaml   ← kubectl apply THIS to staging cluster ONCE  
-bootstrap/prod/root-app.yaml      ← kubectl apply THIS to prod cluster ONCE
-```
-**Purpose:** Root Application for the App-of-Apps pattern.
-After you apply this ONCE, Argo CD takes over and manages everything else.
-This file tells Argo CD: "watch the apps/dev/ folder for child app definitions".
-
----
-
-### apps/   ← Argo CD reads this. You write these once per service.
-```
-apps/dev/
-  user-service.yaml       ← Argo CD Application: deploy user-service to DEV
-  payment-service.yaml    ← Argo CD Application: deploy payment-service to DEV
-  order-service.yaml      ← Argo CD Application: deploy order-service to DEV
-
-apps/staging/             ← same files, pointing to staging values
-apps/prod/                ← same files, NO auto-sync (manual approval required)
-```
-**Purpose:** Defines HOW each service is deployed (which chart, which values, which namespace).
-**Who changes this:** Platform team, rarely (only if Argo CD config changes).
-**Does NOT contain:** Image tags, replica counts, resource limits.
-
----
-
-### clusters/   ← CI PIPELINE UPDATES THIS on every build
-```
-clusters/dev/user-service/values-dev.yaml        ← CI updates image.tag here
-clusters/dev/payment-service/values-dev.yaml     ← CI updates image.tag here
-clusters/dev/order-service/values-dev.yaml       ← CI updates image.tag here
-
-clusters/staging/user-service/values-staging.yaml
-clusters/prod/user-service/values-prod.yaml      ← Higher replicas, HA config
-```
-**Purpose:** Per-environment, per-service Helm values overrides.
-**Who changes this:** 
-  - The `image.tag` field: CI pipeline (automated)
-  - Everything else: Platform team (manual, via PR)
-**This is where image tags live** — when CI pushes abc1234, it edits values-dev.yaml.
-
----
-
-### helm-charts/generic-service/   ← ONE chart for ALL microservices
-```
-helm-charts/generic-service/
-  Chart.yaml               ← Chart metadata (name, version)
-  values.yaml              ← BASE DEFAULTS (lowest priority in merge)
-  templates/
-    deployment.yaml        ← Kubernetes Deployment template
-    service.yaml           ← Kubernetes Service template  
-    hpa.yaml               ← HorizontalPodAutoscaler (if autoscaling.enabled=true)
-    serviceaccount.yaml    ← ServiceAccount with IRSA annotation
-    pdb.yaml               ← PodDisruptionBudget (if enabled=true)
-    _helpers.tpl           ← Reusable Go template helper functions
-```
-**Purpose:** The actual Kubernetes YAML templates. Parameterised by values.yaml.
-**Who changes this:** Platform team, rarely (when adding new K8s features).
-**Key concept:** This one chart is reused for user-service, payment-service, order-service,
-and any future service. Only the values files differ.
-
----
-
-### platform/   ← Cluster-wide infrastructure config
-```
-platform/networking/namespace-strategy.yaml   ← Kubernetes Namespace definitions
-platform/security/argocd-projects.yaml        ← Argo CD RBAC (who can deploy where)
-platform/security/external-secrets.yaml       ← AWS Secrets Manager → K8s Secrets
-platform/monitoring/prometheus-servicemonitor.yaml ← Prometheus auto-discovery
-```
-**Purpose:** Non-application cluster resources. Applied once, rarely changed.
-
----
-
-## Values Merge Example (user-service in prod)
-
-Argo CD runs: `helm template` with these value files in order:
-
-```yaml
-# 1. helm-charts/generic-service/values.yaml  (base defaults)
-replicaCount: 1
-image:
-  tag: "latest"
-autoscaling:
-  enabled: false
-resources:
-  requests:
-    cpu: "100m"
-
-# 2. clusters/prod/user-service/values-prod.yaml  (overrides)
-replicaCount: 3          # ← overrides base
-image:
-  tag: "abc1234"         # ← overrides base (set by CI)
-autoscaling:
-  enabled: true          # ← overrides base
-  maxReplicas: 20
-resources:
-  requests:
-    cpu: "200m"          # ← overrides base
-
-# RESULT merged values used to render templates:
-replicaCount: 3
-image.tag: "abc1234"
-autoscaling.enabled: true
-autoscaling.maxReplicas: 20
-resources.requests.cpu: "200m"
-```
-
----
-
-## Adding a New Service (e.g. notification-service)
-
-1. Create `clusters/dev/notification-service/values-dev.yaml` (set serviceName, image.repository)
-2. Create `clusters/staging/notification-service/values-staging.yaml`
-3. Create `clusters/prod/notification-service/values-prod.yaml`
-4. Create `apps/dev/notification-service.yaml` (Argo CD Application pointing to generic chart)
-5. Create `apps/staging/notification-service.yaml`
-6. Create `apps/prod/notification-service.yaml`
-7. Commit and push → Argo CD App-of-Apps detects new app YAML → auto-deploys
-
-**No Helm chart changes. No CI pipeline changes. Just config files.**
+Dev: Fast-paced with auto-sync enabled so developers get instant feedback.
+Staging: Mirrors production for final testing.
+Prod: High security with manual sync only. A human must manually approve the final sync in Argo CD to prevent accidental changes.
+5. Key Security Features
+No Direct Access: Developers never need kubectl access to production; everything happens via Git.
+No Static Secrets: Using IRSA (IAM Roles for Service Accounts), applications get temporary credentials to access AWS services without needing hardcoded passwords.
+External Secrets: Actual secrets (like database passwords) are stored in AWS Secrets Manager and synced into the cluster at runtime, meaning no secrets ever live in Git.
+By following this strategy, you gain a clean audit trail (every change is a commit), easy rollbacks (just revert the Git commit), and enhanced security (no cluster credentials stored in CI tools).
