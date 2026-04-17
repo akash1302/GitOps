@@ -4,13 +4,16 @@ Here is a simplified breakdown of the strategy:
 
 ### 1. The Core Rule: Separate Repositories
 The most important concept is keeping your code and your deployment instructions in separate places:
-*   **Application Repo (The "What"):** Contains the source code (e.g., Node.js or Python), the Dockerfile, and unit tests. This is owned by developers.Example Application Repositories:
+*   **Application Repo (The "What"):** Contains the source code (e.g., Node.js or Python), the Dockerfile, and unit tests. This is owned by developers.
+  Example Application Repositories:
+
 *   order-service-repo
 *   payment-service-repo
 *   user-service-repo
 
 
-*   **GitOps Repo (The "How" and "Where"):** Contains deployment configurations like Helm values and Argo CD manifests. This is owned by the platform team and is the heart of the system.Example GitOps Repositorie:
+*   **GitOps Repo (The "How" and "Where"):** Contains deployment configurations like Helm values and Argo CD manifests. This is owned by the platform team and is the heart of the system.
+   Example GitOps Repository:
 
 *   platform-config-repo
 
